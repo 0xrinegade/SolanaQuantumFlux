@@ -9,8 +9,9 @@ import {
   Finality
 } from '@solana/web3.js';
 import {
-  getOrCreateAssociatedTokenAccount,
-  TOKEN_PROGRAM_ID
+  Token,
+  TOKEN_PROGRAM_ID,
+  ASSOCIATED_TOKEN_PROGRAM_ID
 } from '@solana/spl-token';
 import { QrngClientOptions, QrngInstructionType, QrngConfirmOptions } from './types';
 
@@ -208,20 +209,19 @@ export class QrngClient {
    */
   async getTokenBalance(walletPublicKey: PublicKey): Promise<number> {
     try {
-      // Find the associated token account
-      const tokenAccount = await getOrCreateAssociatedTokenAccount(
+      // Create a token instance
+      const token = new Token(
         this.connection,
-        { publicKey: walletPublicKey } as Signer,
         this.tokenMint,
-        walletPublicKey,
-        true
+        TOKEN_PROGRAM_ID,
+        { publicKey: walletPublicKey } as Signer
       );
       
-      // Get the token balance
-      const balance = await this.connection.getTokenAccountBalance(tokenAccount.address);
+      // Get or create the associated token account
+      const tokenAccount = await token.getOrCreateAssociatedAccountInfo(walletPublicKey);
       
       // Return the UI amount (decimal representation)
-      return balance.value.uiAmount || 0;
+      return Number(tokenAccount.amount) / Math.pow(10, 8); // Assuming 8 decimals for TSOTCHKE
     } catch (error) {
       // If the token account doesn't exist, return 0
       return 0;
@@ -245,26 +245,22 @@ export class QrngClient {
       // Get the wallet's public key
       const walletPublicKey = wallet.publicKey;
       
-      // Get the wallet's token account
-      const userTokenAccount = await getOrCreateAssociatedTokenAccount(
+      // Create a token instance
+      const token = new Token(
         this.connection,
-        wallet as Signer,
         this.tokenMint,
-        walletPublicKey
+        TOKEN_PROGRAM_ID,
+        wallet as Signer
       );
       
-      // Get the treasury's token account
-      const treasuryTokenAccount = await getOrCreateAssociatedTokenAccount(
-        this.connection,
-        wallet as Signer,
-        this.tokenMint,
-        this.treasuryAddress,
-        true
-      );
+      // Get the wallet's token account
+      const userTokenAccount = await token.getOrCreateAssociatedAccountInfo(walletPublicKey);
+      
+      // Get the treasury's token account  
+      const treasuryTokenAccount = await token.getOrCreateAssociatedAccountInfo(this.treasuryAddress);
       
       // Check if the user has enough tokens
-      const userTokenBalance = await this.connection.getTokenAccountBalance(userTokenAccount.address);
-      const balance = userTokenBalance.value.uiAmount || 0;
+      const balance = Number(userTokenAccount.amount) / Math.pow(10, 8); // Assuming 8 decimals for TSOTCHKE
       
       if (balance < 1.0) {
         throw new QrngInsufficientBalanceError(
