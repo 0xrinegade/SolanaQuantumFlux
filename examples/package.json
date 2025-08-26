@@ -8,12 +8,12 @@
     "clean": "rimraf dist"
   },
   "dependencies": {
-    "@solana/web3.js": "^1.73.0",
-    "@solana/spl-token": "^0.3.7"
+    "@solana/spl-token": "^0.1.8",
+    "@solana/web3.js": "^1.73.0"
   },
   "devDependencies": {
     "@types/node": "^18.11.18",
     "rimraf": "^4.1.2",
-    "typescript": "^4.9.5"
+    "typescript": "^5.2.0"
   }
 }

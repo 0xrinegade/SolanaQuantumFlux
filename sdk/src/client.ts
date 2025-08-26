@@ -5,21 +5,76 @@ import {
   Signer,
   Transaction,
   sendAndConfirmTransaction,
-  SYSVAR_CLOCK_PUBKEY
+  SYSVAR_CLOCK_PUBKEY,
+  Finality
 } from '@solana/web3.js';
 import {
-  getOrCreateAssociatedTokenAccount,
-  TOKEN_PROGRAM_ID
+  Token,
+  TOKEN_PROGRAM_ID,
+  ASSOCIATED_TOKEN_PROGRAM_ID
 } from '@solana/spl-token';
-import { QrngClientOptions, QrngInstructionType } from './types';
+import { QrngClientOptions, QrngInstructionType, QrngConfirmOptions } from './types';
 
 /**
- * Simple error class for QRNG operations
+ * Base error class for QRNG operations
  */
 export class QrngError extends Error {
   constructor(message: string) {
     super(message);
     this.name = 'QrngError';
+  }
+}
+
+/**
+ * Error thrown when wallet has insufficient TSOTCHKE tokens
+ */
+export class QrngInsufficientBalanceError extends QrngError {
+  constructor(message: string) {
+    super(message);
+    this.name = 'QrngInsufficientBalanceError';
+  }
+}
+
+/**
+ * Error thrown when a transaction fails
+ */
+export class QrngTransactionError extends QrngError {
+  public readonly signature?: string;
+  
+  constructor(message: string, signature?: string) {
+    super(message);
+    this.name = 'QrngTransactionError';
+    this.signature = signature;
+  }
+}
+
+/**
+ * Error thrown when transaction confirmation times out
+ */
+export class QrngTimeoutError extends QrngError {
+  constructor(message: string) {
+    super(message);
+    this.name = 'QrngTimeoutError';
+  }
+}
+
+/**
+ * Error thrown when there's an issue with the treasury account
+ */
+export class QrngInvalidTreasuryError extends QrngError {
+  constructor(message: string) {
+    super(message);
+    this.name = 'QrngInvalidTreasuryError';
+  }
+}
+
+/**
+ * Error thrown when transaction doesn't return expected data
+ */
+export class QrngInvalidReturnDataError extends QrngError {
+  constructor(message: string) {
+    super(message);
+    this.name = 'QrngInvalidReturnDataError';
   }
 }
 
@@ -75,16 +130,18 @@ export class QrngClient {
    * Generate a random 64-bit unsigned integer
    * 
    * @param wallet - Wallet to pay for the random number generation
+   * @param options - Optional confirmation options
    * @returns A promise that resolves to the random u64 value decoded from Base64 encoded Hex data
    */
-  async generateRandomU64(wallet: Keypair | Signer): Promise<bigint> {
+  async generateRandomU64(wallet: Keypair | Signer, options?: QrngConfirmOptions): Promise<bigint> {
     const result = await this.generateRandom(
       wallet,
-      QrngInstructionType.GENERATE_RANDOM_U64
+      QrngInstructionType.GENERATE_RANDOM_U64,
+      options
     );
     
     if (result.length < 8) {
-      throw new QrngError('Invalid return data from QRNG service');
+      throw new QrngInvalidReturnDataError('Invalid return data from QRNG service');
     }
     
     return result.readBigUInt64LE(0);
@@ -94,16 +151,18 @@ export class QrngClient {
    * Generate a random double between 0 and 1
    * 
    * @param wallet - Wallet to pay for the random number generation
+   * @param options - Optional confirmation options
    * @returns A promise that resolves to the random double value decoded from Base64 encoded Hex data
    */
-  async generateRandomDouble(wallet: Keypair | Signer): Promise<number> {
+  async generateRandomDouble(wallet: Keypair | Signer, options?: QrngConfirmOptions): Promise<number> {
     const result = await this.generateRandom(
       wallet,
-      QrngInstructionType.GENERATE_RANDOM_DOUBLE
+      QrngInstructionType.GENERATE_RANDOM_DOUBLE,
+      options
     );
     
     if (result.length < 8) {
-      throw new QrngError('Invalid return data from QRNG service');
+      throw new QrngInvalidReturnDataError('Invalid return data from QRNG service');
     }
     
     return result.readDoubleLE(0);
@@ -113,19 +172,33 @@ export class QrngClient {
    * Generate a random boolean
    * 
    * @param wallet - Wallet to pay for the random number generation
+   * @param options - Optional confirmation options
    * @returns A promise that resolves to the random boolean value decoded from Base64 encoded Hex data
    */
-  async generateRandomBoolean(wallet: Keypair | Signer): Promise<boolean> {
+  async generateRandomBoolean(wallet: Keypair | Signer, options?: QrngConfirmOptions): Promise<boolean> {
     const result = await this.generateRandom(
       wallet,
-      QrngInstructionType.GENERATE_RANDOM_BOOLEAN
+      QrngInstructionType.GENERATE_RANDOM_BOOLEAN,
+      options
     );
     
     if (result.length < 1) {
-      throw new QrngError('Invalid return data from QRNG service');
+      throw new QrngInvalidReturnDataError('Invalid return data from QRNG service');
     }
     
     return result[0] === 1;
+  }
+  
+  /**
+   * Find the configuration address for the QRNG program
+   * 
+   * @returns A tuple containing the config address PublicKey and the bump seed
+   */
+  findConfigAddress(): [PublicKey, number] {
+    return PublicKey.findProgramAddressSync(
+      [Buffer.from('token_qrng_config')],
+      this.programId
+    );
   }
   
   /**
@@ -136,20 +209,19 @@ export class QrngClient {
    */
   async getTokenBalance(walletPublicKey: PublicKey): Promise<number> {
     try {
-      // Find the associated token account
-      const tokenAccount = await getOrCreateAssociatedTokenAccount(
+      // Create a token instance
+      const token = new Token(
         this.connection,
-        { publicKey: walletPublicKey } as Signer,
         this.tokenMint,
-        walletPublicKey,
-        true
+        TOKEN_PROGRAM_ID,
+        { publicKey: walletPublicKey } as Signer
       );
       
-      // Get the token balance
-      const balance = await this.connection.getTokenAccountBalance(tokenAccount.address);
+      // Get or create the associated token account
+      const tokenAccount = await token.getOrCreateAssociatedAccountInfo(walletPublicKey);
       
       // Return the UI amount (decimal representation)
-      return balance.value.uiAmount || 0;
+      return Number(tokenAccount.amount) / Math.pow(10, 8); // Assuming 8 decimals for TSOTCHKE
     } catch (error) {
       // If the token account doesn't exist, return 0
       return 0;
@@ -161,39 +233,37 @@ export class QrngClient {
    * 
    * @param wallet - Wallet to pay for the random number generation
    * @param instructionType - The type of random number to generate
+   * @param options - Optional confirmation options
    * @returns A promise that resolves to the raw buffer containing decoded Base64 data from the Solana program
    */
   private async generateRandom(
     wallet: Keypair | Signer,
-    instructionType: QrngInstructionType
+    instructionType: QrngInstructionType,
+    options?: QrngConfirmOptions
   ): Promise<Buffer> {
     try {
       // Get the wallet's public key
       const walletPublicKey = wallet.publicKey;
       
-      // Get the wallet's token account
-      const userTokenAccount = await getOrCreateAssociatedTokenAccount(
+      // Create a token instance
+      const token = new Token(
         this.connection,
-        wallet as Signer,
         this.tokenMint,
-        walletPublicKey
+        TOKEN_PROGRAM_ID,
+        wallet as Signer
       );
       
-      // Get the treasury's token account
-      const treasuryTokenAccount = await getOrCreateAssociatedTokenAccount(
-        this.connection,
-        wallet as Signer,
-        this.tokenMint,
-        this.treasuryAddress,
-        true
-      );
+      // Get the wallet's token account
+      const userTokenAccount = await token.getOrCreateAssociatedAccountInfo(walletPublicKey);
+      
+      // Get the treasury's token account  
+      const treasuryTokenAccount = await token.getOrCreateAssociatedAccountInfo(this.treasuryAddress);
       
       // Check if the user has enough tokens
-      const userTokenBalance = await this.connection.getTokenAccountBalance(userTokenAccount.address);
-      const balance = userTokenBalance.value.uiAmount || 0;
+      const balance = Number(userTokenAccount.amount) / Math.pow(10, 8); // Assuming 8 decimals for TSOTCHKE
       
       if (balance < 1.0) {
-        throw new QrngError(
+        throw new QrngInsufficientBalanceError(
           `Insufficient TSOTCHKE tokens. You have ${balance} but need at least 1.0.`
         );
       }
@@ -223,19 +293,24 @@ export class QrngClient {
         this.connection,
         transaction,
         [wallet as Signer],
-        { commitment: 'confirmed' }
+        { 
+          commitment: options?.commitment || 'confirmed',
+          ...(options?.timeout && { preflightCommitment: options.commitment || 'confirmed' })
+        }
       );
       
       // Get the transaction result
       const txInfo = await this.connection.getTransaction(signature, {
-        commitment: 'confirmed',
+        commitment: (options?.commitment === 'processed' || options?.commitment === 'confirmed' || options?.commitment === 'finalized') 
+          ? options.commitment as Finality 
+          : 'confirmed',
         maxSupportedTransactionVersion: 0
       });
       
       // Extract the return data
       const meta = txInfo?.meta as any;
       if (!meta || !meta.returnData || !meta.returnData.data) {
-        throw new QrngError('No return data found in transaction');
+        throw new QrngInvalidReturnDataError('No return data found in transaction');
       }
       
       // Decode the Base64 encoded Hex data returned by the program
@@ -246,6 +321,19 @@ export class QrngClient {
       // Handle and wrap errors
       if (error instanceof QrngError) {
         throw error;
+      }
+      
+      // Check for specific error types
+      if (error.message && error.message.includes('Transaction was not confirmed')) {
+        throw new QrngTimeoutError(`Transaction confirmation timeout: ${error.message}`);
+      }
+      
+      if (error.message && error.message.includes('insufficient funds')) {
+        throw new QrngInsufficientBalanceError(`Insufficient funds: ${error.message}`);
+      }
+      
+      if (error.message && error.message.includes('Transaction failed')) {
+        throw new QrngTransactionError(`Transaction failed: ${error.message}`, error.signature);
       }
       
       throw new QrngError(`Error generating random number: ${error.message || error}`);

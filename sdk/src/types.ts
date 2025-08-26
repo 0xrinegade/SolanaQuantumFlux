@@ -1,4 +1,4 @@
-import { PublicKey } from '@solana/web3.js';
+import { PublicKey, Commitment, Finality } from '@solana/web3.js';
 
 /**
  * Basic configuration options for the QRNG client
@@ -18,6 +18,21 @@ export interface QrngClientOptions {
    * Treasury address (defaults to mainnet treasury)
    */
   treasuryAddress?: PublicKey;
+}
+
+/**
+ * Options for transaction confirmation
+ */
+export interface QrngConfirmOptions {
+  /**
+   * Commitment level for the transaction
+   */
+  commitment?: Commitment;
+  
+  /**
+   * Maximum time to wait for confirmation (in milliseconds)
+   */
+  timeout?: number;
 }
 
 /**
